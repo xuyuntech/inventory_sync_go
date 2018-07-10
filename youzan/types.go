@@ -1,9 +1,17 @@
 package youzan
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+	"strings"
+)
+
+var (
+	ErrOfflineNotFound = errors.New("Offline not found")
+)
 
 type Offline struct {
-	OfflineID int64  `json:"id"`
+	OfflineID string `json:"id"`
 	Name      string `json:"name"`
 }
 
@@ -14,7 +22,7 @@ type Offlines struct {
 
 // OfflineItem 网点商品
 type GoodsDetail struct {
-	NumIID  int64       `json:"num_iid"`
+	NumIID  string      `json:"num_iid"`
 	Title   string      `json:"title"`
 	Skus    []*GoodsSku `json:"skus"`
 	OuterID string      `json:"outer_id"`
@@ -23,22 +31,35 @@ type GoodsDetail struct {
 type GoodsSku struct {
 	OuterID            string  `json:"outer_id"`
 	SkuID              int64   `json:"sku_id"`
-	Quantity           float64 `json:"quantity"`
+	Quantity           float64 `json:"-"`
+	QuantityStr        string  `json:"quantity"`
+	Price              float64 `json:"-"`
+	PriceStr           string  `json:"price"`
 	PropertiesNameJSON string  `json:"properties_name_json"`
-	Price              float64 `json:"price"`
 }
 
-var (
-	ErrOfflineNotFound = errors.New("Offline not found")
-)
+type GoodSkuProperty struct {
+	Kid string `json:"kid"`
+	Vid string `json:"vid"`
+	K   string `json:"k"`
+	V   string `json:"v"`
+}
 
-func (o *Offlines) GetIDByName(name string) (int64, error) {
+func (gs *GoodsSku) FormatProperties() ([]*GoodSkuProperty, error) {
+	m := make([]*GoodSkuProperty, 0)
+	if err := json.Unmarshal([]byte(gs.PropertiesNameJSON), &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (o *Offlines) GetIDByName(name string) (string, error) {
 	for _, offline := range o.Items {
-		if offline.Name == name {
+		if strings.Trim(offline.Name, " ") == strings.Trim(name, " ") {
 			return offline.OfflineID, nil
 		}
 	}
-	return 0, ErrOfflineNotFound
+	return "", ErrOfflineNotFound
 }
 
 // Item 有赞商品信息

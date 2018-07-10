@@ -7,6 +7,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+var InventorySyncTaskCache *InventorySyncTask
+
+type InventorySyncTask struct {
+	Status    string
+	ItemsHash map[string][]*ExcelRow
+}
+
 type Api struct{}
 
 func New() *Api {
@@ -25,6 +32,7 @@ func (a *Api) Run() error {
 		MaxAge:           12 * time.Hour,
 	}))
 	r.POST("/upload", a.Upload)
+	r.GET("/inventorySync/parsing", a.AnalysisInventorySync)
 	return r.Run()
 }
 

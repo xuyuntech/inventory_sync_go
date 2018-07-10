@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math"
-	"math/rand"
 	"sync"
 	"time"
 
@@ -19,13 +18,15 @@ type Request interface {
 	Add(ts []*Task)
 	Start() error
 	Stop()
-	Results() <-chan []byte
+	Results() <-chan *Task
 	Status() string
+	FinishedCount() int
 }
 
 type Task struct {
 	ID      string
 	URL     string
+	Temp    map[string]interface{}
 	Headers map[string]string
 	Method  string
 	Params  map[string]string
@@ -42,7 +43,7 @@ func New(opt *Options) Request {
 		requestThresholdPerSecond: rtp,
 		taskQueue:                 make(chan *Task, 10),
 		countCh:                   make(chan int, rtp),
-		results:                   make(chan []byte),
+		results:                   make(chan *Task),
 		done:                      make(chan struct{}),
 		workingTasks:              make(map[string]*Task),
 	}
@@ -53,7 +54,7 @@ type request struct {
 	// 用来计数，保证每秒请求数不超过阙值
 	countCh                   chan int
 	requestThresholdPerSecond int
-	results                   chan []byte
+	results                   chan *Task
 	workingTasks              map[string]*Task
 	total                     int
 	finished                  int
@@ -71,24 +72,25 @@ func (r *request) Add(ts []*Task) {
 		}
 	}
 }
-func (r *request) doTest(t *Task) {
-	r.RLock()
-	_, ok := r.workingTasks[t.ID]
-	r.RUnlock()
-	if ok {
-		logrus.Error("LimitedRequest task id duplicated(%s)", t.ID)
-		return
-	}
-	r.Lock()
-	r.workingTasks[t.ID] = t
-	r.Unlock()
-	time.Sleep(time.Millisecond * time.Duration(rand.Intn(3000)))
-	r.results <- []byte(fmt.Sprintf("task(%s) test string", t.ID))
-	r.Lock()
-	r.finished++
-	delete(r.workingTasks, t.ID)
-	r.Unlock()
-}
+
+// func (r *request) doTest(t *Task) {
+// 	r.RLock()
+// 	_, ok := r.workingTasks[t.ID]
+// 	r.RUnlock()
+// 	if ok {
+// 		logrus.Error("LimitedRequest task id duplicated(%s)", t.ID)
+// 		return
+// 	}
+// 	r.Lock()
+// 	r.workingTasks[t.ID] = t
+// 	r.Unlock()
+// 	time.Sleep(time.Millisecond * time.Duration(rand.Intn(3000)))
+// 	r.results <- []byte(fmt.Sprintf("task(%s) test string", t.ID))
+// 	r.Lock()
+// 	r.finished++
+// 	delete(r.workingTasks, t.ID)
+// 	r.Unlock()
+// }
 func (r *request) do(t *Task) {
 	r.RLock()
 	_, ok := r.workingTasks[t.ID]
@@ -124,7 +126,8 @@ func (r *request) do(t *Task) {
 		// todo
 		panic(err)
 	}
-	r.results <- b
+	t.Body = b
+	r.results <- t
 	r.Lock()
 	r.finished++
 	delete(r.workingTasks, t.ID)
@@ -135,7 +138,11 @@ func (r *request) Status() string {
 	return fmt.Sprintf("tasks(%d/%d)", r.finished, r.total)
 }
 
-func (r *request) Results() <-chan []byte {
+func (r *request) FinishedCount() int {
+	return r.finished
+}
+
+func (r *request) Results() <-chan *Task {
 	return r.results
 }
 

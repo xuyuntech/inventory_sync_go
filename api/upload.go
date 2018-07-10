@@ -6,14 +6,31 @@ import (
 	"fmt"
 	"io/ioutil"
 	"mime/multipart"
+	"strconv"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/gin-gonic/gin"
 	"github.com/tealeg/xlsx"
-	limitedRequest "github.com/xuyuntech/inventory_sync_go/limited_request"
 	"github.com/xuyuntech/inventory_sync_go/youzan"
-	"golang.org/x/sync/errgroup"
 )
+
+type goodUpdatedSku struct {
+	K          string  `json:"k"`
+	V          string  `json:"v"`
+	Price      float64 `json:"price"`
+	Quantity   float64 `json:"quantity"`
+	ToPrice    float64 `json:"to_price"`
+	ToQuantity float64 `json:"to_quantity"`
+	ID         int64   `json:"id"`
+}
+type goodUpdated struct {
+	OfflineID   int64             `json:"offline_id"`
+	OfflineName string            `json:"offline_name"`
+	ItemID      int64             `json:"item_id"`
+	ItemTitle   string            `json:"item_title"`
+	ItemNo      string            `json:"item_no"`
+	Skus        []*goodUpdatedSku `json:"skus"`
+}
 
 func (a *Api) Upload(c *gin.Context) {
 	var (
@@ -64,117 +81,45 @@ func (a *Api) Upload(c *gin.Context) {
 		}
 		itemsHash[excelRow.ItemNO] = append(itemsHash[excelRow.ItemNO], excelRow)
 	}
-	// 获取所有门店
-	offlines, err := youzan.QueryOfflines()
-	if err != nil {
-		RespErr(c, err, "获取 offlines 失败")
-		return
+	InventorySyncTaskCache = &InventorySyncTask{
+		Status:    "init",
+		ItemsHash: itemsHash,
 	}
-	// 获取所有有赞商品
-	items, err := youzan.QueryItems()
-	if err != nil {
-		RespErr(c, err)
-		return
-	}
+	Resp(c, nil)
 
-	tasks := make([]*limitedRequest.Task, 0)
-	logrus.Debugf("items: %d", len(items))
-	for _, item := range items {
-		if item.ItemNO == "" {
-			logrus.Debugf("items (%s) has no item_no", item.Title)
-			continue
-		}
-		// 到 excel 里找 item.ItemNo 对应的所有条目
-		itemsExcel, ok := itemsHash[item.ItemNO]
-		if !ok {
-			logrus.Debugf("itemsExcel %s (%s) no found", item.ItemNO, item.Title)
-			continue
-		}
-		for _, itemExcel := range itemsExcel {
-			offlineID, err := offlines.GetIDByName(itemExcel.ShopName)
-			if err != nil {
-				logrus.Errorf("excel 里没有门店 %s", itemExcel.ShopName)
-				continue
-			}
-			itemID := fmt.Sprintf("%d", item.ItemID)
-			offlineIDStr := fmt.Sprintf("%d", offlineID)
-			tasks = append(tasks, &limitedRequest.Task{
-				ID:     fmt.Sprintf("%s-%s", itemID, offlineIDStr),
-				URL:    "https://open.youzan.com/api/oauthentry/youzan.multistore.goods.sku/3.0.0/get",
-				Method: "GET",
-				Params: map[string]string{
-					"num_iid":      itemID,
-					"offline_id":   offlineIDStr,
-					"access_token": youzan.AccessToken,
-				},
-			})
-		}
-	}
+}
 
-	logrus.Infof("===== Start to fetch goods from youzan. ====")
-
-	lreq := limitedRequest.New(&limitedRequest.Options{
-		RequestThresholdPerSecond: 5,
-	})
-
-	c.Writer.Header().Set("Content-Type", "text/event-strem")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
-
-	var (
-		g             errgroup.Group
-		goodsDetailCh = make(chan *youzan.GoodsDetail)
-	)
-
-	notify := c.Writer.CloseNotify()
-
-	g.Go(func() error {
-		for {
-			gd := <-goodsDetailCh
-
-		}
-	})
-
-	g.Go(func() error {
-		logrus.Debugf("tasks 总数 %d", len(tasks))
-		lreq.Add(tasks)
-		return nil
-	})
-	g.Go(func() error {
-		err := lreq.Start()
-		logrus.Debugf("LimitedRequest ended with err: %v", err)
-		return err
-	})
-
-	g.Go(func() error {
-		results := lreq.Results()
-		for {
-			select {
-			case <-notify:
-				lreq.Stop()
-				return nil
-			case result := <-results:
-				if gd := parseGoodsDetail(result); gd != nil {
-					goodsDetailCh <- gd
-				}
-				// logrus.Debugf("result-> %s, %s\r", string(result), lreq.Status())
-			}
-		}
-	})
-
-	if err := g.Wait(); err != nil {
-		RespErr(c, err)
-	}
+type goodsDetailResponse struct {
+	Response struct {
+		Item *youzan.GoodsDetail `json:"item"`
+	} `json:"response"`
 }
 
 func parseGoodsDetail(b []byte) *youzan.GoodsDetail {
-	gd := &youzan.GoodsDetail{}
-	if err := json.Unmarshal(b, gd); err != nil {
-		logrus.Errorf("转换 GoodsDetail 出错, b: (%s)", string(b))
+	gdr := &goodsDetailResponse{}
+	if err := json.Unmarshal(b, gdr); err != nil {
+		logrus.Errorf("转换 GoodsDetail 出错(%v), b: (%s)", err, string(b))
 		return nil
 	}
-	return gd
+	// 格式化 sku
+	detail := gdr.Response.Item
+	if detail == nil {
+		return nil
+	}
+	var err error
+	for _, sku := range detail.Skus {
+		sku.Price, err = strconv.ParseFloat(sku.PriceStr, 64)
+		if err != nil {
+			logrus.Errorf("商品 [%s] sku 价格转换错误: %f", sku.Price)
+			continue
+		}
+		sku.Quantity, err = strconv.ParseFloat(sku.QuantityStr, 64)
+		if err != nil {
+			logrus.Errorf("商品 [%s] sku 库存转换错误: %f", sku.Quantity)
+			continue
+		}
+	}
+	return detail
 }
 
 func needYouzanGoodToBeUpdated(excelRow *ExcelRow, gd *youzan.GoodsDetail) (bool, error) {
@@ -183,10 +128,11 @@ func needYouzanGoodToBeUpdated(excelRow *ExcelRow, gd *youzan.GoodsDetail) (bool
 	}
 	sku := gd.Skus[0]
 	if sku.OuterID != gd.OuterID {
-		return false, fmt.Errorf("有赞商品 [%s] 第一个 sku 的商品编码设置不正确")
+		return false, fmt.Errorf("有赞商品 [%s] 第一个 sku 的商品编码设置不正确", gd.Title)
 	}
 
 	if sku.Price != excelRow.Price || sku.Quantity != excelRow.Quantity {
 		return true, nil
 	}
+	return false, nil
 }
